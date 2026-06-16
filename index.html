@@ -145,6 +145,7 @@
     flex:1;
     overflow-y:auto;
     overflow-x:hidden;
+    overscroll-behavior-x:none;
     -webkit-overflow-scrolling:touch;
     padding:6px 0 24px;
   }
@@ -154,6 +155,7 @@
     align-items:center;
     gap:clamp(10px,2.5vw,18px);
     width:100%;
+    max-width:100%;
     padding:0 clamp(8px,2vw,16px);
   }
   .page-shell{
@@ -248,6 +250,7 @@ let renderToken = 0;
 let pagesStrip = null;
 let renderedPages = new Map();
 let scrollRaf = null;
+let scrollIdleTimer = null;
 let stripLoading = false;
 let lastViewerWidth = 0;
 let resizeTimer = null;
@@ -310,6 +313,8 @@ function goToTicket(num){
 }
 
 function goHome(){
+  clearTimeout(scrollIdleTimer);
+  scrollIdleTimer = null;
   resetViewerStrip();
   currentTicket = null;
   setActiveButton(null);
@@ -354,15 +359,48 @@ function findHeadingItemIndices(items, ticketNum){
 
 function itemBox(item, viewport){
   const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-  const scale = Math.hypot(tx[0], tx[1]) || 1;
-  const fontHeight = Math.hypot(tx[2], tx[3]) || scale * 12;
+  const fontHeight = Math.hypot(tx[2], tx[3]) || Math.hypot(tx[0], tx[1]) || 12;
+  const scaleX = Math.hypot(tx[0], tx[1]) || 1;
   const left = tx[4];
   const top = tx[5] - fontHeight;
-  const width = item.width ? Math.abs(item.width * scale) : fontHeight * 0.55 * (item.str ? item.str.length : 1);
-  return { left, top, width, height: fontHeight };
+  const width = item.width
+    ? Math.abs(item.width * scaleX)
+    : fontHeight * 0.55 * (item.str ? item.str.trim().length : 1);
+  return { left, top, width, height: fontHeight, centerY: top + fontHeight / 2 };
+}
+
+function filterIndicesSameLine(indices, items, viewport, tolerance){
+  if(!indices || indices.length <= 1) return indices || [];
+  tolerance = tolerance != null ? tolerance : Math.max(6, (itemBox(items[indices[0]], viewport).height || 12) * 0.45);
+  const firstBox = itemBox(items[indices[0]], viewport);
+  const baseY = firstBox.centerY;
+  return indices.filter(idx => {
+    const item = items[idx];
+    if(!item || !item.str || !item.str.trim()) return false;
+    const box = itemBox(item, viewport);
+    return Math.abs(box.centerY - baseY) <= tolerance;
+  });
+}
+
+function filterSpansSameLine(spans, tolerance){
+  if(!spans || spans.length <= 1) return spans || [];
+  const firstRect = spans[0].getBoundingClientRect();
+  tolerance = tolerance != null ? tolerance : Math.max(6, firstRect.height * 0.45);
+  const baseY = firstRect.top + firstRect.height / 2;
+  return spans.filter(span => {
+    const text = (span.textContent || "").trim();
+    if(!text) return false;
+    const rect = span.getBoundingClientRect();
+    if(rect.width < 0.5 && rect.height < 0.5) return false;
+    const centerY = rect.top + rect.height / 2;
+    return Math.abs(centerY - baseY) <= tolerance;
+  });
 }
 
 function boxFromItems(items, indices, viewport){
+  indices = filterIndicesSameLine(indices, items, viewport);
+  if(!indices.length) return null;
+
   let minL = Infinity;
   let minT = Infinity;
   let maxR = -Infinity;
@@ -370,7 +408,7 @@ function boxFromItems(items, indices, viewport){
 
   for(const idx of indices){
     const item = items[idx];
-    if(!item || !item.str) continue;
+    if(!item || !item.str || !item.str.trim()) continue;
     const box = itemBox(item, viewport);
     minL = Math.min(minL, box.left);
     minT = Math.min(minT, box.top);
@@ -410,6 +448,9 @@ function findHeadingBoxFromSpans(textLayer, shell, ticketNum){
 
   if(!targetSpans.length) return null;
 
+  targetSpans = filterSpansSameLine(targetSpans);
+  if(!targetSpans.length) return null;
+
   const shellRect = shell.getBoundingClientRect();
   let minL = Infinity;
   let minT = Infinity;
@@ -435,6 +476,12 @@ function findHeadingBoxFromSpans(textLayer, shell, ticketNum){
 }
 
 function findHeadingBox(shell, ticketNum){
+  const textLayer = shell.querySelector(".textLayer");
+  if(textLayer){
+    const spanBox = findHeadingBoxFromSpans(textLayer, shell, ticketNum);
+    if(spanBox) return spanBox;
+  }
+
   const meta = shellMeta.get(shell);
   if(meta){
     const indices = findHeadingItemIndices(meta.textContent.items, ticketNum);
@@ -444,8 +491,6 @@ function findHeadingBox(shell, ticketNum){
     }
   }
 
-  const textLayer = shell.querySelector(".textLayer");
-  if(textLayer) return findHeadingBoxFromSpans(textLayer, shell, ticketNum);
   return null;
 }
 
@@ -464,14 +509,18 @@ function flashHeadingBox(shell, box){
   return overlay;
 }
 
+function resetHorizontalScroll(){
+  viewerWrap.scrollLeft = 0;
+}
+
 function highlightTicketHeading(shell, ticketNum){
   if(!shell || !ticketNum) return false;
 
   const box = findHeadingBox(shell, ticketNum);
   if(!box) return false;
 
-  const overlay = flashHeadingBox(shell, box);
-  overlay.scrollIntoView({ behavior: "smooth", block: "center" });
+  flashHeadingBox(shell, box);
+  resetHorizontalScroll();
   return true;
 }
 
@@ -614,7 +663,11 @@ async function scrollToPage(pageNum){
   await ensurePageRendered(pageNum, myToken);
   if(myToken !== renderToken) return;
   const shell = renderedPages.get(pageNum);
-  if(shell) shell.scrollIntoView({ behavior: "auto", block: "start" });
+  if(shell){
+    resetHorizontalScroll();
+    shell.scrollIntoView({ behavior: "auto", block: "start", inline: "nearest" });
+    resetHorizontalScroll();
+  }
 }
 
 function getVisiblePage(){
@@ -667,7 +720,7 @@ async function expandStripIfNeeded(){
 
 function onViewerScroll(){
   if(scrollRaf) return;
-  scrollRaf = requestAnimationFrame(async () => {
+  scrollRaf = requestAnimationFrame(() => {
     scrollRaf = null;
     if(!pdfDoc || !pagesStrip) return;
 
@@ -678,8 +731,12 @@ function onViewerScroll(){
       if(ticket) currentTicket = ticket;
       updatePageInfo();
     }
-    await expandStripIfNeeded();
   });
+
+  clearTimeout(scrollIdleTimer);
+  scrollIdleTimer = setTimeout(() => {
+    expandStripIfNeeded();
+  }, 220);
 }
 
 async function openViewerAt(pageNum, ticketNum, fixedStartPage, options){
@@ -708,8 +765,10 @@ async function openViewerAt(pageNum, ticketNum, fixedStartPage, options){
   if(myToken !== renderToken) return;
 
   updatePageInfo();
+  resetHorizontalScroll();
   requestAnimationFrame(() => {
     scrollToPage(pageNum).then(() => {
+      resetHorizontalScroll();
       if(highlight && ticketNum && renderToken === myToken){
         highlightTicketHeadingWithRetry(pageNum, ticketNum, myToken);
       }
