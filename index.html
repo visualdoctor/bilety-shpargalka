@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Шпаргалка — Билеты</title>
+<style>
+  :root{
+    --bg:#1c1d21;
+    --panel:#26282e;
+    --accent:#ffcc4d;
+    --accent-dim:#5b4a1f;
+    --text:#eceef1;
+    --text-dim:#9a9da5;
+    --btn:#33353c;
+    --btn-active:#ffcc4d;
+    --btn-active-text:#1c1d21;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    display:flex;
+    flex-direction:column;
+    min-height:100vh;
+  }
+  header{
+    padding:14px 16px 10px;
+    text-align:center;
+  }
+  header h1{
+    margin:0;
+    font-size:18px;
+    font-weight:600;
+    letter-spacing:.2px;
+  }
+  header p{
+    margin:4px 0 0;
+    font-size:13px;
+    color:var(--text-dim);
+  }
+  .grid{
+    display:grid;
+    grid-template-columns:repeat(6, 1fr);
+    gap:8px;
+    padding:10px 14px;
+    max-width:560px;
+    margin:0 auto;
+    width:100%;
+  }
+  @media (max-width:480px){
+    .grid{grid-template-columns:repeat(5, 1fr);}
+  }
+  .ticket-btn{
+    background:var(--btn);
+    color:var(--text);
+    border:none;
+    border-radius:var(--radius);
+    padding:10px 0;
+    font-size:15px;
+    font-weight:600;
+    cursor:pointer;
+    transition:background .15s ease, color .15s ease, transform .1s ease;
+  }
+  .ticket-btn:active{transform:scale(0.94);}
+  .ticket-btn.active{
+    background:var(--btn-active);
+    color:var(--btn-active-text);
+  }
+  .toolbar{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:10px;
+    padding:10px 14px 4px;
+    flex-wrap:wrap;
+  }
+  .toolbar button{
+    background:var(--panel);
+    color:var(--text);
+    border:none;
+    border-radius:8px;
+    width:36px;
+    height:36px;
+    font-size:16px;
+    cursor:pointer;
+  }
+  .toolbar button:disabled{opacity:.35; cursor:default;}
+  .page-info{
+    font-size:13px;
+    color:var(--text-dim);
+    min-width:140px;
+    text-align:center;
+  }
+  .viewer-wrap{
+    flex:1;
+    overflow:auto;
+    display:flex;
+    justify-content:center;
+    padding:6px 0 24px;
+  }
+  .page-shell{
+    position:relative;
+    background:#fff;
+    box-shadow:0 4px 24px rgba(0,0,0,.4);
+    margin:0 auto;
+    line-height:0;
+  }
+  .page-shell canvas{
+    display:block;
+  }
+  .textLayer{
+    position:absolute;
+    top:0; left:0;
+    overflow:hidden;
+    line-height:1;
+  }
+  .textLayer span{
+    color:transparent;
+    position:absolute;
+    white-space:pre;
+    cursor:text;
+    transform-origin:0% 0%;
+  }
+  .loading{
+    color:var(--text-dim);
+    text-align:center;
+    padding:40px 0;
+    font-size:14px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Шпаргалка — Билеты</h1>
+  <p>Нажми на номер билета — откроется нужная страница</p>
+</header>
+
+<div class="grid" id="grid"></div>
+
+<div class="toolbar">
+  <button id="prevBtn" title="Предыдущая страница">‹</button>
+  <span class="page-info" id="pageInfo">—</span>
+  <button id="nextBtn" title="Следующая страница">›</button>
+</div>
+
+<div class="viewer-wrap" id="viewerWrap">
+  <div class="loading" id="loadingMsg">Загрузка PDF…</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+// Стартовая страница каждого билета (1-30), найдена по заголовкам "БИЛЕТ №N" в PDF.
+const TICKET_PAGES = [1,4,7,10,14,19,24,27,31,33,39,43,45,48,50,54,59,62,65,70,75,80,85,91,95,99,104,107,111,116];
+
+const PDF_URL = "tickets.pdf";
+
+let pdfDoc = null;
+let currentPage = 1;
+let currentTicket = null;
+let renderToken = 0;
+
+const grid = document.getElementById("grid");
+const viewerWrap = document.getElementById("viewerWrap");
+const pageInfo = document.getElementById("pageInfo");
+const prevBtn = document.getElementById("prevBtn");
+const nextBtn = document.getElementById("nextBtn");
+
+// Создаём 30 кнопок
+TICKET_PAGES.forEach((page, idx) => {
+  const num = idx + 1;
+  const btn = document.createElement("button");
+  btn.className = "ticket-btn";
+  btn.textContent = num;
+  btn.dataset.num = num;
+  btn.addEventListener("click", () => goToTicket(num));
+  grid.appendChild(btn);
+});
+
+function setActiveButton(num){
+  document.querySelectorAll(".ticket-btn").forEach(b => {
+    b.classList.toggle("active", Number(b.dataset.num) === num);
+  });
+}
+
+async function init(){
+  try{
+    pdfDoc = await pdfjsLib.getDocument(PDF_URL).promise;
+    document.getElementById("loadingMsg").remove();
+    await renderPage(TICKET_PAGES[0], 1);
+  }catch(err){
+    document.getElementById("loadingMsg").textContent = "Не удалось загрузить PDF: " + err.message;
+  }
+}
+
+function goToTicket(num){
+  const page = TICKET_PAGES[num - 1];
+  setActiveButton(num);
+  renderPage(page, num);
+}
+
+async function renderPage(pageNum, ticketNum){
+  if(!pdfDoc) return;
+  pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
+  currentPage = pageNum;
+  currentTicket = ticketNum || null;
+
+  const myToken = ++renderToken;
+
+  const page = await pdfDoc.getPage(pageNum);
+  if(myToken !== renderToken) return;
+
+  const containerWidth = Math.min(viewerWrap.clientWidth - 16, 760);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const outputScale = window.devicePixelRatio || 1;
+  const scale = containerWidth / baseViewport.width;
+  const viewport = page.getViewport({ scale });
+
+  // Готовим контейнер страницы
+  viewerWrap.innerHTML = "";
+  const shell = document.createElement("div");
+  shell.className = "page-shell";
+  shell.style.width = viewport.width + "px";
+  shell.style.height = viewport.height + "px";
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(viewport.width * outputScale);
+  canvas.height = Math.floor(viewport.height * outputScale);
+  canvas.style.width = viewport.width + "px";
+  canvas.style.height = viewport.height + "px";
+  const ctx = canvas.getContext("2d");
+  const transform = outputScale !== 1 ? [outputScale,0,0,outputScale,0,0] : null;
+
+  shell.appendChild(canvas);
+  viewerWrap.appendChild(shell);
+
+  await page.render({ canvasContext: ctx, viewport, transform }).promise;
+  if(myToken !== renderToken) return;
+
+  // Текстовый слой (для поиска и подсветки слова "БИЛЕТ")
+  const textLayerDiv = document.createElement("div");
+  textLayerDiv.className = "textLayer";
+  textLayerDiv.style.width = viewport.width + "px";
+  textLayerDiv.style.height = viewport.height + "px";
+  shell.appendChild(textLayerDiv);
+
+  const textContent = await page.getTextContent();
+  if(myToken !== renderToken) return;
+
+  const textLayerTask = pdfjsLib.renderTextLayer({
+    textContentSource: textContent,
+    container: textLayerDiv,
+    viewport
+  });
+  await textLayerTask.promise;
+  if(myToken !== renderToken) return;
+
+  updatePageInfo();
+  prevBtn.disabled = currentPage <= 1;
+  nextBtn.disabled = currentPage >= pdfDoc.numPages;
+
+  if(ticketNum){
+    highlightTicketHeading(textLayerDiv, shell);
+  }
+}
+
+function highlightTicketHeading(textLayerDiv, shell){
+  const spans = textLayerDiv.querySelectorAll("span");
+  let target = null;
+  for(const span of spans){
+    const t = span.textContent || "";
+    if(t.toUpperCase().includes("БИЛЕТ") && t === t.toUpperCase() && /[А-ЯЁ]/.test(t)){
+      target = span;
+      break;
+    }
+  }
+  if(!target) return;
+
+  // Плавная подсветка как в Telegram: вспыхивает и через ~3с угасает
+  target.style.transition = "none";
+  target.style.backgroundColor = "rgba(255,204,77,0.85)";
+  target.style.borderRadius = "3px";
+  target.style.boxShadow = "0 0 0 3px rgba(255,204,77,0.85)";
+
+  requestAnimationFrame(() => {
+    shell.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => {
+      target.style.transition = "background-color 1.4s ease, box-shadow 1.4s ease";
+      target.style.backgroundColor = "transparent";
+      target.style.boxShadow = "0 0 0 0 rgba(255,204,77,0)";
+    }, 1400);
+  });
+}
+
+function updatePageInfo(){
+  let label = `Стр. ${currentPage} из ${pdfDoc.numPages}`;
+  if(currentTicket) label = `Билет ${currentTicket} · ${label}`;
+  pageInfo.textContent = label;
+}
+
+prevBtn.addEventListener("click", () => {
+  currentTicket = null;
+  setActiveButton(null);
+  renderPage(currentPage - 1, null);
+});
+nextBtn.addEventListener("click", () => {
+  currentTicket = null;
+  setActiveButton(null);
+  renderPage(currentPage + 1, null);
+});
+
+window.addEventListener("resize", () => {
+  renderPage(currentPage, currentTicket);
+});
+
+init();
+</script>
+</body>
+</html>
