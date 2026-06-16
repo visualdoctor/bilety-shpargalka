@@ -9,7 +9,6 @@
     --bg:#1c1d21;
     --panel:#26282e;
     --accent:#ffcc4d;
-    --accent-dim:#5b4a1f;
     --text:#eceef1;
     --text-dim:#9a9da5;
     --btn:#33353c;
@@ -23,10 +22,10 @@
     background:var(--bg);
     color:var(--text);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    display:flex;
-    flex-direction:column;
     min-height:100vh;
   }
+  .screen{display:none; min-height:100vh;}
+  .screen.active{display:flex; flex-direction:column;}
   header{
     padding:14px 16px 10px;
     text-align:center;
@@ -35,7 +34,6 @@
     margin:0;
     font-size:18px;
     font-weight:600;
-    letter-spacing:.2px;
   }
   header p{
     margin:4px 0 0;
@@ -46,7 +44,7 @@
     display:grid;
     grid-template-columns:repeat(6, 1fr);
     gap:8px;
-    padding:10px 14px;
+    padding:10px 14px 24px;
     max-width:560px;
     margin:0 auto;
     width:100%;
@@ -70,13 +68,41 @@
     background:var(--btn-active);
     color:var(--btn-active-text);
   }
+  .viewer-topbar{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    padding:10px 12px 6px;
+    position:sticky;
+    top:0;
+    z-index:10;
+    background:var(--bg);
+  }
+  .back-btn{
+    background:var(--panel);
+    color:var(--text);
+    border:none;
+    border-radius:8px;
+    padding:8px 12px;
+    font-size:14px;
+    font-weight:600;
+    cursor:pointer;
+    white-space:nowrap;
+  }
+  .back-btn:active{opacity:.8;}
+  .page-info{
+    flex:1;
+    font-size:13px;
+    color:var(--text-dim);
+    text-align:center;
+    min-width:0;
+  }
   .toolbar{
     display:flex;
     align-items:center;
     justify-content:center;
     gap:10px;
-    padding:10px 14px 4px;
-    flex-wrap:wrap;
+    padding:4px 14px 8px;
   }
   .toolbar button{
     background:var(--panel);
@@ -89,12 +115,6 @@
     cursor:pointer;
   }
   .toolbar button:disabled{opacity:.35; cursor:default;}
-  .page-info{
-    font-size:13px;
-    color:var(--text-dim);
-    min-width:140px;
-    text-align:center;
-  }
   .viewer-wrap{
     flex:1;
     overflow:auto;
@@ -109,9 +129,7 @@
     margin:0 auto;
     line-height:0;
   }
-  .page-shell canvas{
-    display:block;
-  }
+  .page-shell canvas{display:block;}
   .textLayer{
     position:absolute;
     top:0; left:0;
@@ -128,51 +146,63 @@
   .loading{
     color:var(--text-dim);
     text-align:center;
-    padding:40px 0;
+    padding:40px 16px;
     font-size:14px;
   }
 </style>
 </head>
 <body>
 
-<header>
-  <h1>Шпаргалка — Билеты</h1>
-  <p>Нажми на номер билета — откроется нужная страница</p>
-</header>
-
-<div class="grid" id="grid"></div>
-
-<div class="toolbar">
-  <button id="prevBtn" title="Предыдущая страница">‹</button>
-  <span class="page-info" id="pageInfo">—</span>
-  <button id="nextBtn" title="Следующая страница">›</button>
+<div class="screen active" id="homeScreen">
+  <header>
+    <h1>Шпаргалка — Билеты</h1>
+    <p>Нажми на номер билета — откроется нужная страница</p>
+  </header>
+  <div class="grid" id="grid"></div>
+  <div class="loading" id="homeLoading">Загрузка PDF…</div>
 </div>
 
-<div class="viewer-wrap" id="viewerWrap">
-  <div class="loading" id="loadingMsg">Загрузка PDF…</div>
+<div class="screen" id="viewerScreen">
+  <div class="viewer-topbar">
+    <button class="back-btn" id="backBtn" type="button">← Назад</button>
+    <span class="page-info" id="pageInfo">—</span>
+  </div>
+  <div class="toolbar">
+    <button id="prevBtn" title="Предыдущая страница" type="button">‹</button>
+    <button id="nextBtn" title="Следующая страница" type="button">›</button>
+  </div>
+  <div class="viewer-wrap" id="viewerWrap">
+    <div class="loading" id="viewerLoading">Открываем страницу…</div>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
-// Стартовая страница каждого билета (1-30), найдена по заголовкам "БИЛЕТ №N" в PDF.
 const TICKET_PAGES = [1,4,7,10,14,19,24,27,31,33,39,43,45,48,50,54,59,62,65,70,75,80,85,91,95,99,104,107,111,116];
-
 const PDF_URL = "tickets.pdf";
+const HIGHLIGHT_MS = 3000;
+const HIGHLIGHT_FADE_MS = 800;
 
 let pdfDoc = null;
+let pdfReady = false;
 let currentPage = 1;
 let currentTicket = null;
 let renderToken = 0;
+let highlightTimer = null;
 
+const homeScreen = document.getElementById("homeScreen");
+const viewerScreen = document.getElementById("viewerScreen");
 const grid = document.getElementById("grid");
 const viewerWrap = document.getElementById("viewerWrap");
 const pageInfo = document.getElementById("pageInfo");
 const prevBtn = document.getElementById("prevBtn");
 const nextBtn = document.getElementById("nextBtn");
+const backBtn = document.getElementById("backBtn");
+const homeLoading = document.getElementById("homeLoading");
+const viewerLoading = document.getElementById("viewerLoading");
 
-// Создаём 30 кнопок
 TICKET_PAGES.forEach((page, idx) => {
   const num = idx + 1;
   const btn = document.createElement("button");
@@ -183,35 +213,127 @@ TICKET_PAGES.forEach((page, idx) => {
   grid.appendChild(btn);
 });
 
+function showScreen(name){
+  homeScreen.classList.toggle("active", name === "home");
+  viewerScreen.classList.toggle("active", name === "viewer");
+}
+
 function setActiveButton(num){
   document.querySelectorAll(".ticket-btn").forEach(b => {
-    b.classList.toggle("active", Number(b.dataset.num) === num);
+    b.classList.toggle("active", num != null && Number(b.dataset.num) === num);
   });
 }
 
 async function init(){
   try{
     pdfDoc = await pdfjsLib.getDocument(PDF_URL).promise;
-    document.getElementById("loadingMsg").remove();
-    await renderPage(TICKET_PAGES[0], 1);
+    pdfReady = true;
+    homeLoading.remove();
   }catch(err){
-    document.getElementById("loadingMsg").textContent = "Не удалось загрузить PDF: " + err.message;
+    homeLoading.textContent = "Не удалось загрузить PDF: " + err.message;
   }
 }
 
 function goToTicket(num){
+  if(!pdfReady){
+    homeLoading.textContent = "PDF ещё загружается, подождите…";
+    return;
+  }
   const page = TICKET_PAGES[num - 1];
+  currentTicket = num;
   setActiveButton(num);
+  showScreen("viewer");
   renderPage(page, num);
+}
+
+function goHome(){
+  if(highlightTimer){
+    clearTimeout(highlightTimer);
+    highlightTimer = null;
+  }
+  currentTicket = null;
+  setActiveButton(null);
+  showScreen("home");
+}
+
+function goToTicketHeading(ticketNum, textLayerDiv, shell){
+  const spans = Array.from(textLayerDiv.querySelectorAll("span"));
+  const pattern = new RegExp("БИЛЕТ\\s*№\\s*" + ticketNum + "\\b", "i");
+  let targets = [];
+
+  for(const span of spans){
+    if(pattern.test((span.textContent || "").replace(/\s+/g, " "))){
+      targets = [span];
+      break;
+    }
+  }
+
+  if(!targets.length){
+    for(let i = 0; i < spans.length; i++){
+      let combined = "";
+      const group = [];
+      for(let j = i; j < Math.min(i + 10, spans.length); j++){
+        combined += spans[j].textContent || "";
+        group.push(spans[j]);
+        if(pattern.test(combined.replace(/\s+/g, " "))){
+          targets = group;
+          break;
+        }
+      }
+      if(targets.length) break;
+    }
+  }
+
+  if(!targets.length){
+    for(const span of spans){
+      const t = span.textContent || "";
+      if(/БИЛЕТ/i.test(t) && /№/.test(t)){
+        targets = [span];
+        break;
+      }
+    }
+  }
+
+  if(!targets.length) return;
+
+  targets.forEach(target => {
+    target.style.transition = "none";
+    target.style.backgroundColor = "rgba(255,204,77,0.9)";
+    target.style.borderRadius = "3px";
+    target.style.boxShadow = "0 0 0 3px rgba(255,204,77,0.75)";
+  });
+
+  requestAnimationFrame(() => {
+    targets[0].scrollIntoView({ behavior: "smooth", block: "center" });
+    highlightTimer = setTimeout(() => {
+      targets.forEach(target => {
+        target.style.transition = "background-color " + HIGHLIGHT_FADE_MS + "ms ease, box-shadow " + HIGHLIGHT_FADE_MS + "ms ease";
+        target.style.backgroundColor = "transparent";
+        target.style.boxShadow = "0 0 0 0 rgba(255,204,77,0)";
+      });
+      highlightTimer = null;
+    }, HIGHLIGHT_MS);
+  });
 }
 
 async function renderPage(pageNum, ticketNum){
   if(!pdfDoc) return;
+
+  if(highlightTimer){
+    clearTimeout(highlightTimer);
+    highlightTimer = null;
+  }
+
   pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
   currentPage = pageNum;
-  currentTicket = ticketNum || null;
+  currentTicket = ticketNum ?? currentTicket;
 
   const myToken = ++renderToken;
+  viewerWrap.innerHTML = "";
+  const loading = document.createElement("div");
+  loading.className = "loading";
+  loading.textContent = "Открываем страницу…";
+  viewerWrap.appendChild(loading);
 
   const page = await pdfDoc.getPage(pageNum);
   if(myToken !== renderToken) return;
@@ -222,7 +344,6 @@ async function renderPage(pageNum, ticketNum){
   const scale = containerWidth / baseViewport.width;
   const viewport = page.getViewport({ scale });
 
-  // Готовим контейнер страницы
   viewerWrap.innerHTML = "";
   const shell = document.createElement("div");
   shell.className = "page-shell";
@@ -243,7 +364,6 @@ async function renderPage(pageNum, ticketNum){
   await page.render({ canvasContext: ctx, viewport, transform }).promise;
   if(myToken !== renderToken) return;
 
-  // Текстовый слой (для поиска и подсветки слова "БИЛЕТ")
   const textLayerDiv = document.createElement("div");
   textLayerDiv.className = "textLayer";
   textLayerDiv.style.width = viewport.width + "px";
@@ -253,12 +373,11 @@ async function renderPage(pageNum, ticketNum){
   const textContent = await page.getTextContent();
   if(myToken !== renderToken) return;
 
-  const textLayerTask = pdfjsLib.renderTextLayer({
+  await pdfjsLib.renderTextLayer({
     textContentSource: textContent,
     container: textLayerDiv,
     viewport
-  });
-  await textLayerTask.promise;
+  }).promise;
   if(myToken !== renderToken) return;
 
   updatePageInfo();
@@ -266,57 +385,30 @@ async function renderPage(pageNum, ticketNum){
   nextBtn.disabled = currentPage >= pdfDoc.numPages;
 
   if(ticketNum){
-    highlightTicketHeading(textLayerDiv, shell);
+    goToTicketHeading(ticketNum, textLayerDiv, shell);
   }
-}
-
-function highlightTicketHeading(textLayerDiv, shell){
-  const spans = textLayerDiv.querySelectorAll("span");
-  let target = null;
-  for(const span of spans){
-    const t = span.textContent || "";
-    if(t.toUpperCase().includes("БИЛЕТ") && t === t.toUpperCase() && /[А-ЯЁ]/.test(t)){
-      target = span;
-      break;
-    }
-  }
-  if(!target) return;
-
-  // Плавная подсветка как в Telegram: вспыхивает и через ~3с угасает
-  target.style.transition = "none";
-  target.style.backgroundColor = "rgba(255,204,77,0.85)";
-  target.style.borderRadius = "3px";
-  target.style.boxShadow = "0 0 0 3px rgba(255,204,77,0.85)";
-
-  requestAnimationFrame(() => {
-    shell.scrollIntoView({ behavior: "smooth", block: "center" });
-    setTimeout(() => {
-      target.style.transition = "background-color 1.4s ease, box-shadow 1.4s ease";
-      target.style.backgroundColor = "transparent";
-      target.style.boxShadow = "0 0 0 0 rgba(255,204,77,0)";
-    }, 1400);
-  });
 }
 
 function updatePageInfo(){
-  let label = `Стр. ${currentPage} из ${pdfDoc.numPages}`;
-  if(currentTicket) label = `Билет ${currentTicket} · ${label}`;
+  let label = "Стр. " + currentPage + " из " + pdfDoc.numPages;
+  if(currentTicket) label = "Билет " + currentTicket + " · " + label;
   pageInfo.textContent = label;
 }
 
+backBtn.addEventListener("click", goHome);
+
 prevBtn.addEventListener("click", () => {
-  currentTicket = null;
-  setActiveButton(null);
   renderPage(currentPage - 1, null);
 });
+
 nextBtn.addEventListener("click", () => {
-  currentTicket = null;
-  setActiveButton(null);
   renderPage(currentPage + 1, null);
 });
 
 window.addEventListener("resize", () => {
-  renderPage(currentPage, currentTicket);
+  if(viewerScreen.classList.contains("active")){
+    renderPage(currentPage, currentTicket);
+  }
 });
 
 init();
