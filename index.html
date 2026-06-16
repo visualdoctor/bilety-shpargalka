@@ -24,49 +24,93 @@
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
     min-height:100vh;
   }
-  .screen{display:none; min-height:100vh;}
+  .screen{display:none; min-height:100vh; min-height:100dvh;}
   .screen.active{display:flex; flex-direction:column;}
-  header{
-    padding:14px 16px 10px;
+  #homeScreen.active{
+    height:100vh;
+    height:100dvh;
+    overflow:hidden;
+  }
+  .home-header{
+    flex-shrink:0;
+    padding:clamp(10px,2.5vw,18px) clamp(16px,4vw,32px) clamp(6px,1.5vw,10px);
+    padding-top:max(clamp(10px,2.5vw,18px), env(safe-area-inset-top));
     text-align:center;
   }
-  header h1{
+  .home-header h1{
     margin:0;
-    font-size:18px;
+    font-size:clamp(17px,4vw,22px);
     font-weight:600;
   }
-  header p{
+  .home-header p{
     margin:4px 0 0;
-    font-size:13px;
+    font-size:clamp(12px,2.8vw,14px);
     color:var(--text-dim);
   }
-  .grid{
-    display:grid;
-    grid-template-columns:repeat(6, 1fr);
-    gap:8px;
-    padding:10px 14px 24px;
-    max-width:560px;
-    margin:0 auto;
+  .home-main{
+    flex:1;
+    min-height:0;
+    display:flex;
     width:100%;
+    padding:0 clamp(10px,3vw,28px) max(clamp(10px,3vw,28px), env(safe-area-inset-bottom));
   }
-  @media (max-width:480px){
-    .grid{grid-template-columns:repeat(5, 1fr);}
+  .grid{
+    flex:1;
+    width:100%;
+    min-height:0;
+    display:grid;
+    grid-template-columns:repeat(3, minmax(0, 1fr));
+    grid-auto-rows:1fr;
+    gap:clamp(8px,2vmin,18px);
+    align-content:stretch;
+  }
+  @media (min-width:520px){
+    .grid{grid-template-columns:repeat(5, minmax(0, 1fr));}
+  }
+  @media (min-width:768px){
+    .grid{grid-template-columns:repeat(6, minmax(0, 1fr));}
+  }
+  @media (min-width:1100px){
+    .home-main{
+      max-width:1400px;
+      margin:0 auto;
+    }
+    .grid{grid-template-columns:repeat(10, minmax(0, 1fr));}
   }
   .ticket-btn{
     background:var(--btn);
     color:var(--text);
     border:none;
-    border-radius:var(--radius);
-    padding:10px 0;
-    font-size:15px;
-    font-weight:600;
+    border-radius:clamp(10px,2.5vmin,16px);
+    width:100%;
+    height:100%;
+    min-height:clamp(52px,12vmin,110px);
+    padding:0;
+    font-size:clamp(18px,4.8vmin,28px);
+    font-weight:700;
+    line-height:1;
     cursor:pointer;
-    transition:background .15s ease, color .15s ease, transform .1s ease;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    box-shadow:0 2px 0 rgba(0,0,0,.22);
+    -webkit-tap-highlight-color:transparent;
+    touch-action:manipulation;
+    user-select:none;
+    transition:background .15s ease, color .15s ease, transform .1s ease, filter .15s ease;
   }
-  .ticket-btn:active{transform:scale(0.94);}
+  @media (hover:hover){
+    .ticket-btn:hover{filter:brightness(1.1);}
+  }
+  .ticket-btn:focus-visible{
+    outline:2px solid var(--accent);
+    outline-offset:2px;
+  }
+  .ticket-btn:active{transform:scale(0.96);}
   .ticket-btn.active{
     background:var(--btn-active);
     color:var(--btn-active-text);
+    box-shadow:0 2px 0 rgba(0,0,0,.15);
   }
   .viewer-topbar{
     display:flex;
@@ -149,16 +193,26 @@
     padding:40px 16px;
     font-size:14px;
   }
+  #homeLoading{
+    position:absolute;
+    left:0;
+    right:0;
+    bottom:max(20px, env(safe-area-inset-bottom));
+    padding:0 16px;
+  }
+  #homeScreen{position:relative;}
 </style>
 </head>
 <body>
 
 <div class="screen active" id="homeScreen">
-  <header>
+  <header class="home-header">
     <h1>Шпаргалка — Билеты</h1>
     <p>Нажми на номер билета — откроется нужная страница</p>
   </header>
-  <div class="grid" id="grid"></div>
+  <div class="home-main">
+    <div class="grid" id="grid"></div>
+  </div>
   <div class="loading" id="homeLoading">Загрузка PDF…</div>
 </div>
 
