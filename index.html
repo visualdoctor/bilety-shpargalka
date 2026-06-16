@@ -168,22 +168,27 @@
   .textLayer{
     position:absolute;
     top:0; left:0;
-    overflow:hidden;
+    overflow:visible;
     line-height:1;
+    pointer-events:none;
+    user-select:none;
   }
   .textLayer span{
     color:transparent;
     position:absolute;
     white-space:pre;
-    cursor:text;
     transform-origin:0% 0%;
   }
-  @keyframes highlight-flash-fade{
+  @keyframes heading-highlight-fade{
     from{background-color:rgba(164,245,66,0.92);}
     to{background-color:transparent;}
   }
-  .textLayer span.highlight-flash{
-    animation:highlight-flash-fade 3s ease-out forwards;
+  .heading-highlight-flash{
+    position:absolute;
+    z-index:5;
+    pointer-events:none;
+    border-radius:4px;
+    animation:heading-highlight-fade 3s ease-out forwards;
   }
   .loading{
     color:var(--text-dim);
@@ -231,6 +236,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs
 const TICKET_PAGES = [1,4,7,10,14,19,24,27,31,33,39,43,45,48,50,54,59,62,65,70,75,80,85,91,95,99,104,107,111,116];
 const PDF_URL = "tickets.pdf";
 const INITIAL_FORWARD_PAGES = 7;
+const HIGHLIGHT_RETRY_MS = 80;
+const HIGHLIGHT_MAX_ATTEMPTS = 12;
 
 let pdfDoc = null;
 let pdfReady = false;
@@ -244,6 +251,7 @@ let scrollRaf = null;
 let stripLoading = false;
 let lastViewerWidth = 0;
 let resizeTimer = null;
+const shellMeta = new WeakMap();
 
 const homeScreen = document.getElementById("homeScreen");
 const viewerScreen = document.getElementById("viewerScreen");
@@ -308,56 +316,178 @@ function goHome(){
   showScreen("home");
 }
 
-function goToTicketHeading(ticketNum, textLayerDiv, shell){
-  const spans = Array.from(textLayerDiv.querySelectorAll("span"));
-  const pattern = new RegExp("БИЛЕТ\\s*№\\s*" + ticketNum + "\\b", "i");
-  let targets = [];
+function normalizeHeadingText(text){
+  return (text || "").replace(/[\u00a0\s]+/g, " ").trim();
+}
 
-  for(const span of spans){
-    if(pattern.test((span.textContent || "").replace(/\s+/g, " "))){
-      targets = [span];
-      break;
-    }
-  }
+function ticketHeadingPattern(ticketNum){
+  const num = String(ticketNum).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    "билет[\\s\\u00a0]*(?:№|#|n[º°o]\\.?)[\\s\\u00a0]*" + num + "(?!\\d)",
+    "i"
+  );
+}
 
-  if(!targets.length){
-    for(let i = 0; i < spans.length; i++){
-      let combined = "";
-      const group = [];
-      for(let j = i; j < Math.min(i + 10, spans.length); j++){
-        combined += spans[j].textContent || "";
-        group.push(spans[j]);
-        if(pattern.test(combined.replace(/\s+/g, " "))){
-          targets = group;
-          break;
-        }
+function findHeadingItemIndices(items, ticketNum){
+  if(!items || !items.length) return null;
+  const pattern = ticketHeadingPattern(ticketNum);
+  const chunks = [];
+
+  items.forEach((item, idx) => {
+    if(item && item.str) chunks.push({ idx, str: item.str });
+  });
+
+  for(let i = 0; i < chunks.length; i++){
+    let combined = "";
+    const group = [];
+    for(let j = i; j < Math.min(i + 20, chunks.length); j++){
+      combined += chunks[j].str;
+      group.push(chunks[j].idx);
+      if(pattern.test(normalizeHeadingText(combined))){
+        return group;
       }
-      if(targets.length) break;
     }
   }
 
-  if(!targets.length){
-    for(const span of spans){
-      const t = span.textContent || "";
-      if(/БИЛЕТ/i.test(t) && /№/.test(t)){
-        targets = [span];
+  return null;
+}
+
+function itemBox(item, viewport){
+  const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+  const scale = Math.hypot(tx[0], tx[1]) || 1;
+  const fontHeight = Math.hypot(tx[2], tx[3]) || scale * 12;
+  const left = tx[4];
+  const top = tx[5] - fontHeight;
+  const width = item.width ? Math.abs(item.width * scale) : fontHeight * 0.55 * (item.str ? item.str.length : 1);
+  return { left, top, width, height: fontHeight };
+}
+
+function boxFromItems(items, indices, viewport){
+  let minL = Infinity;
+  let minT = Infinity;
+  let maxR = -Infinity;
+  let maxB = -Infinity;
+
+  for(const idx of indices){
+    const item = items[idx];
+    if(!item || !item.str) continue;
+    const box = itemBox(item, viewport);
+    minL = Math.min(minL, box.left);
+    minT = Math.min(minT, box.top);
+    maxR = Math.max(maxR, box.left + box.width);
+    maxB = Math.max(maxB, box.top + box.height);
+  }
+
+  if(minL === Infinity) return null;
+  return {
+    left: minL - 6,
+    top: minT - 3,
+    width: maxR - minL + 12,
+    height: maxB - minT + 6
+  };
+}
+
+function findHeadingBoxFromSpans(textLayer, shell, ticketNum){
+  const spans = Array.from(textLayer.querySelectorAll("span"));
+  if(!spans.length) return null;
+
+  const pattern = ticketHeadingPattern(ticketNum);
+  let targetSpans = [];
+
+  for(let i = 0; i < spans.length; i++){
+    let combined = "";
+    const group = [];
+    for(let j = i; j < Math.min(i + 20, spans.length); j++){
+      combined += spans[j].textContent || "";
+      group.push(spans[j]);
+      if(pattern.test(normalizeHeadingText(combined))){
+        targetSpans = group;
         break;
       }
     }
+    if(targetSpans.length) break;
   }
 
-  if(!targets.length) return;
+  if(!targetSpans.length) return null;
 
-  targets.forEach(target => {
-    target.classList.add("highlight-flash");
-    target.addEventListener("animationend", () => {
-      target.classList.remove("highlight-flash");
-    }, { once: true });
+  const shellRect = shell.getBoundingClientRect();
+  let minL = Infinity;
+  let minT = Infinity;
+  let maxR = -Infinity;
+  let maxB = -Infinity;
+
+  targetSpans.forEach(span => {
+    const rect = span.getBoundingClientRect();
+    if(rect.width < 0.5 && rect.height < 0.5) return;
+    minL = Math.min(minL, rect.left - shellRect.left);
+    minT = Math.min(minT, rect.top - shellRect.top);
+    maxR = Math.max(maxR, rect.right - shellRect.left);
+    maxB = Math.max(maxB, rect.bottom - shellRect.top);
   });
 
-  requestAnimationFrame(() => {
-    targets[0].scrollIntoView({ behavior: "smooth", block: "center" });
-  });
+  if(minL === Infinity) return null;
+  return {
+    left: minL - 6,
+    top: minT - 3,
+    width: maxR - minL + 12,
+    height: maxB - minT + 6
+  };
+}
+
+function findHeadingBox(shell, ticketNum){
+  const meta = shellMeta.get(shell);
+  if(meta){
+    const indices = findHeadingItemIndices(meta.textContent.items, ticketNum);
+    if(indices){
+      const box = boxFromItems(meta.textContent.items, indices, meta.viewport);
+      if(box) return box;
+    }
+  }
+
+  const textLayer = shell.querySelector(".textLayer");
+  if(textLayer) return findHeadingBoxFromSpans(textLayer, shell, ticketNum);
+  return null;
+}
+
+function flashHeadingBox(shell, box){
+  shell.querySelectorAll(".heading-highlight-flash").forEach(el => el.remove());
+
+  const overlay = document.createElement("div");
+  overlay.className = "heading-highlight-flash";
+  overlay.style.left = box.left + "px";
+  overlay.style.top = box.top + "px";
+  overlay.style.width = Math.max(box.width, 8) + "px";
+  overlay.style.height = Math.max(box.height, 8) + "px";
+  shell.appendChild(overlay);
+
+  overlay.addEventListener("animationend", () => overlay.remove(), { once: true });
+  return overlay;
+}
+
+function highlightTicketHeading(shell, ticketNum){
+  if(!shell || !ticketNum) return false;
+
+  const box = findHeadingBox(shell, ticketNum);
+  if(!box) return false;
+
+  const overlay = flashHeadingBox(shell, box);
+  overlay.scrollIntoView({ behavior: "smooth", block: "center" });
+  return true;
+}
+
+function wait(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function highlightTicketHeadingWithRetry(pageNum, ticketNum, myToken){
+  for(let attempt = 0; attempt < HIGHLIGHT_MAX_ATTEMPTS; attempt++){
+    if(renderToken !== myToken) return;
+
+    const shell = renderedPages.get(pageNum);
+    if(shell && shell.querySelector("canvas") && highlightTicketHeading(shell, ticketNum)) return;
+
+    await wait(HIGHLIGHT_RETRY_MS);
+  }
 }
 
 function resetViewerStrip(){
@@ -422,6 +552,7 @@ async function renderPageShell(pageNum, myToken, page){
   }).promise;
   if(myToken !== renderToken) return null;
 
+  shellMeta.set(shell, { textContent, viewport });
   return { shell, textLayerDiv };
 }
 
@@ -580,9 +711,7 @@ async function openViewerAt(pageNum, ticketNum, fixedStartPage, options){
   requestAnimationFrame(() => {
     scrollToPage(pageNum).then(() => {
       if(highlight && ticketNum && renderToken === myToken){
-        const shell = renderedPages.get(pageNum);
-        const textLayer = shell && shell.querySelector(".textLayer");
-        if(textLayer) goToTicketHeading(ticketNum, textLayer, shell);
+        highlightTicketHeadingWithRetry(pageNum, ticketNum, myToken);
       }
     });
   });
