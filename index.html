@@ -225,11 +225,13 @@ const TICKET_PAGES = [1,4,7,10,14,19,24,27,31,33,39,43,45,48,50,54,59,62,65,70,7
 const PDF_URL = "tickets.pdf";
 const HIGHLIGHT_MS = 3000;
 const HIGHLIGHT_FADE_MS = 800;
+const INITIAL_FORWARD_PAGES = 7;
 
 let pdfDoc = null;
 let pdfReady = false;
 let currentPage = 1;
 let currentTicket = null;
+let viewerStartPage = 1;
 let renderToken = 0;
 let highlightTimer = null;
 let pagesStrip = null;
@@ -461,10 +463,9 @@ async function ensurePageRendered(pageNum, myToken){
   return shell;
 }
 
-async function loadPageWindow(centerPage, myToken){
-  const start = Math.max(1, centerPage - 2);
-  const end = Math.min(pdfDoc.numPages, centerPage + 2);
-  for(let p = start; p <= end; p++){
+async function loadForwardPages(throughPage, myToken){
+  const end = Math.min(pdfDoc.numPages, throughPage);
+  for(let p = viewerStartPage; p <= end; p++){
     await ensurePageRendered(p, myToken);
     if(myToken !== renderToken) return;
   }
@@ -473,7 +474,7 @@ async function loadPageWindow(centerPage, myToken){
 async function scrollToPage(pageNum){
   if(!pagesStrip || !pdfDoc) return;
   const myToken = renderToken;
-  pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
+  pageNum = Math.min(Math.max(viewerStartPage, pageNum), pdfDoc.numPages);
   await ensurePageRendered(pageNum, myToken);
   if(myToken !== renderToken) return;
   const shell = renderedPages.get(pageNum);
@@ -504,7 +505,6 @@ function getVisiblePage(){
 async function expandStripIfNeeded(){
   if(!pdfDoc || !pagesStrip || stripLoading) return;
   const myToken = renderToken;
-  const visible = getVisiblePage();
   const wrapRect = viewerWrap.getBoundingClientRect();
   let needLoad = false;
 
@@ -512,30 +512,20 @@ async function expandStripIfNeeded(){
     const pageNum = Number(shell.dataset.page);
     const rect = shell.getBoundingClientRect();
     if(rect.bottom > wrapRect.top - 400 && rect.top < wrapRect.bottom + 400){
-      if(pageNum > 1 && !renderedPages.has(pageNum - 1)) needLoad = true;
       if(pageNum < pdfDoc.numPages && !renderedPages.has(pageNum + 1)) needLoad = true;
     }
   }
 
   if(!needLoad) return;
   stripLoading = true;
-  const anchorPage = visible;
-  const anchorShell = renderedPages.get(anchorPage);
-  const anchorTop = anchorShell ? anchorShell.offsetTop - viewerWrap.scrollTop : 0;
 
-  const minRendered = Math.min(...renderedPages.keys());
   const maxRendered = Math.max(...renderedPages.keys());
-  const loadStart = Math.max(1, minRendered - 2);
   const loadEnd = Math.min(pdfDoc.numPages, maxRendered + 2);
-
-  for(let p = loadStart; p <= loadEnd; p++){
+  for(let p = maxRendered + 1; p <= loadEnd; p++){
     await ensurePageRendered(p, myToken);
     if(myToken !== renderToken) break;
   }
 
-  if(myToken === renderToken && anchorShell){
-    viewerWrap.scrollTop = anchorShell.offsetTop - anchorTop;
-  }
   stripLoading = false;
 }
 
@@ -556,27 +546,27 @@ function onViewerScroll(){
   });
 }
 
-async function openViewerAt(pageNum, ticketNum){
+async function openViewerAt(pageNum, ticketNum, fixedStartPage){
   if(!pdfDoc) return;
 
   resetViewerStrip();
   const myToken = renderToken;
 
   pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
+  viewerStartPage = fixedStartPage != null ? fixedStartPage : pageNum;
   currentPage = pageNum;
   currentTicket = ticketNum ?? ticketForPage(pageNum) ?? currentTicket;
-
-  const loading = document.createElement("div");
-  loading.className = "loading";
-  loading.textContent = "Открываем страницу…";
-  viewerWrap.appendChild(loading);
 
   pagesStrip = document.createElement("div");
   pagesStrip.className = "pages-strip";
   viewerWrap.innerHTML = "";
   viewerWrap.appendChild(pagesStrip);
 
-  await loadPageWindow(pageNum, myToken);
+  const throughPage = Math.min(
+    pdfDoc.numPages,
+    Math.max(viewerStartPage + INITIAL_FORWARD_PAGES, pageNum)
+  );
+  await loadForwardPages(throughPage, myToken);
   if(myToken !== renderToken) return;
 
   updatePageInfo();
@@ -608,7 +598,7 @@ window.addEventListener("keydown", (e) => {
       scrollToPage(currentPage + 1);
     }
   }else if(e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "PageUp"){
-    if(currentPage > 1){
+    if(currentPage > viewerStartPage){
       e.preventDefault();
       scrollToPage(currentPage - 1);
     }
@@ -617,9 +607,7 @@ window.addEventListener("keydown", (e) => {
 
 window.addEventListener("resize", () => {
   if(viewerScreen.classList.contains("active") && pdfDoc){
-    const page = currentPage;
-    const ticket = currentTicket;
-    openViewerAt(page, ticket);
+    openViewerAt(currentPage, currentTicket, viewerStartPage);
   }
 });
 
