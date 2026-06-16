@@ -143,17 +143,26 @@
   }
   .viewer-wrap{
     flex:1;
-    overflow:auto;
-    display:flex;
-    justify-content:center;
+    overflow-y:auto;
+    overflow-x:hidden;
+    -webkit-overflow-scrolling:touch;
     padding:6px 0 24px;
+  }
+  .pages-strip{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:clamp(10px,2.5vw,18px);
+    width:100%;
+    padding:0 clamp(8px,2vw,16px);
   }
   .page-shell{
     position:relative;
     background:#fff;
     box-shadow:0 4px 24px rgba(0,0,0,.4);
-    margin:0 auto;
+    flex-shrink:0;
     line-height:0;
+    scroll-margin-top:8px;
   }
   .page-shell canvas{display:block;}
   .textLayer{
@@ -223,6 +232,10 @@ let currentPage = 1;
 let currentTicket = null;
 let renderToken = 0;
 let highlightTimer = null;
+let pagesStrip = null;
+let renderedPages = new Map();
+let scrollRaf = null;
+let stripLoading = false;
 
 const homeScreen = document.getElementById("homeScreen");
 const viewerScreen = document.getElementById("viewerScreen");
@@ -231,9 +244,6 @@ const viewerWrap = document.getElementById("viewerWrap");
 const pageInfo = document.getElementById("pageInfo");
 const backBtn = document.getElementById("backBtn");
 const homeLoading = document.getElementById("homeLoading");
-const viewerLoading = document.getElementById("viewerLoading");
-let swipeStartX = 0;
-let swipeStartY = 0;
 
 TICKET_PAGES.forEach((page, idx) => {
   const num = idx + 1;
@@ -266,6 +276,11 @@ async function init(){
   }
 }
 
+function ticketForPage(pageNum){
+  const idx = TICKET_PAGES.indexOf(pageNum);
+  return idx >= 0 ? idx + 1 : null;
+}
+
 function goToTicket(num){
   if(!pdfReady){
     homeLoading.textContent = "PDF ещё загружается, подождите…";
@@ -275,14 +290,11 @@ function goToTicket(num){
   currentTicket = num;
   setActiveButton(num);
   showScreen("viewer");
-  renderPage(page, num);
+  openViewerAt(page, num);
 }
 
 function goHome(){
-  if(highlightTimer){
-    clearTimeout(highlightTimer);
-    highlightTimer = null;
-  }
+  resetViewerStrip();
   currentTicket = null;
   setActiveButton(null);
   showScreen("home");
@@ -348,37 +360,34 @@ function goToTicketHeading(ticketNum, textLayerDiv, shell){
   });
 }
 
-async function renderPage(pageNum, ticketNum){
-  if(!pdfDoc) return;
-
+function resetViewerStrip(){
+  renderToken++;
+  renderedPages = new Map();
+  pagesStrip = null;
+  viewerWrap.innerHTML = "";
   if(highlightTimer){
     clearTimeout(highlightTimer);
     highlightTimer = null;
   }
+}
 
-  pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
-  currentPage = pageNum;
-  currentTicket = ticketNum ?? currentTicket;
+function getContainerWidth(){
+  return Math.min(viewerWrap.clientWidth - 32, 760);
+}
 
-  const myToken = ++renderToken;
-  viewerWrap.innerHTML = "";
-  const loading = document.createElement("div");
-  loading.className = "loading";
-  loading.textContent = "Открываем страницу…";
-  viewerWrap.appendChild(loading);
-
+async function renderPageShell(pageNum, myToken){
   const page = await pdfDoc.getPage(pageNum);
-  if(myToken !== renderToken) return;
+  if(myToken !== renderToken) return null;
 
-  const containerWidth = Math.min(viewerWrap.clientWidth - 16, 760);
+  const containerWidth = getContainerWidth();
   const baseViewport = page.getViewport({ scale: 1 });
   const outputScale = window.devicePixelRatio || 1;
   const scale = containerWidth / baseViewport.width;
   const viewport = page.getViewport({ scale });
 
-  viewerWrap.innerHTML = "";
   const shell = document.createElement("div");
   shell.className = "page-shell";
+  shell.dataset.page = String(pageNum);
   shell.style.width = viewport.width + "px";
   shell.style.height = viewport.height + "px";
 
@@ -391,10 +400,9 @@ async function renderPage(pageNum, ticketNum){
   const transform = outputScale !== 1 ? [outputScale,0,0,outputScale,0,0] : null;
 
   shell.appendChild(canvas);
-  viewerWrap.appendChild(shell);
 
   await page.render({ canvasContext: ctx, viewport, transform }).promise;
-  if(myToken !== renderToken) return;
+  if(myToken !== renderToken) return null;
 
   const textLayerDiv = document.createElement("div");
   textLayerDiv.className = "textLayer";
@@ -403,20 +411,184 @@ async function renderPage(pageNum, ticketNum){
   shell.appendChild(textLayerDiv);
 
   const textContent = await page.getTextContent();
-  if(myToken !== renderToken) return;
+  if(myToken !== renderToken) return null;
 
   await pdfjsLib.renderTextLayer({
     textContentSource: textContent,
     container: textLayerDiv,
     viewport
   }).promise;
+  if(myToken !== renderToken) return null;
+
+  return { shell, textLayerDiv };
+}
+
+function insertPageShell(pageNum, shell){
+  const nextPage = renderedPages.get(pageNum + 1);
+  if(nextPage){
+    pagesStrip.insertBefore(shell, nextPage);
+  }else{
+    pagesStrip.appendChild(shell);
+  }
+  renderedPages.set(pageNum, shell);
+}
+
+async function ensurePageRendered(pageNum, myToken){
+  pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
+  if(renderedPages.has(pageNum)) return renderedPages.get(pageNum);
+
+  const placeholder = document.createElement("div");
+  placeholder.className = "page-shell";
+  placeholder.dataset.page = String(pageNum);
+  placeholder.style.width = getContainerWidth() + "px";
+  placeholder.style.minHeight = "120px";
+  placeholder.style.display = "flex";
+  placeholder.style.alignItems = "center";
+  placeholder.style.justifyContent = "center";
+  placeholder.style.color = "#666";
+  placeholder.style.fontSize = "14px";
+  placeholder.textContent = "Стр. " + pageNum + "…";
+  insertPageShell(pageNum, placeholder);
+
+  const result = await renderPageShell(pageNum, myToken);
+  if(myToken !== renderToken || !result) return null;
+
+  const { shell } = result;
+  if(renderedPages.get(pageNum) === placeholder){
+    pagesStrip.replaceChild(shell, placeholder);
+    renderedPages.set(pageNum, shell);
+  }
+  return shell;
+}
+
+async function loadPageWindow(centerPage, myToken){
+  const start = Math.max(1, centerPage - 2);
+  const end = Math.min(pdfDoc.numPages, centerPage + 2);
+  for(let p = start; p <= end; p++){
+    await ensurePageRendered(p, myToken);
+    if(myToken !== renderToken) return;
+  }
+}
+
+async function scrollToPage(pageNum){
+  if(!pagesStrip || !pdfDoc) return;
+  const myToken = renderToken;
+  pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
+  await ensurePageRendered(pageNum, myToken);
+  if(myToken !== renderToken) return;
+  const shell = renderedPages.get(pageNum);
+  if(shell) shell.scrollIntoView({ behavior: "auto", block: "start" });
+}
+
+function getVisiblePage(){
+  const shells = pagesStrip ? Array.from(pagesStrip.querySelectorAll(".page-shell[data-page]")) : [];
+  if(!shells.length) return currentPage;
+
+  const wrapTop = viewerWrap.getBoundingClientRect().top;
+  const wrapCenter = wrapTop + viewerWrap.clientHeight * 0.35;
+  let bestPage = currentPage;
+  let bestDist = Infinity;
+
+  for(const shell of shells){
+    const rect = shell.getBoundingClientRect();
+    const center = rect.top + rect.height / 2;
+    const dist = Math.abs(center - wrapCenter);
+    if(dist < bestDist){
+      bestDist = dist;
+      bestPage = Number(shell.dataset.page);
+    }
+  }
+  return bestPage;
+}
+
+async function expandStripIfNeeded(){
+  if(!pdfDoc || !pagesStrip || stripLoading) return;
+  const myToken = renderToken;
+  const visible = getVisiblePage();
+  const wrapRect = viewerWrap.getBoundingClientRect();
+  let needLoad = false;
+
+  for(const shell of pagesStrip.querySelectorAll(".page-shell[data-page]")){
+    const pageNum = Number(shell.dataset.page);
+    const rect = shell.getBoundingClientRect();
+    if(rect.bottom > wrapRect.top - 400 && rect.top < wrapRect.bottom + 400){
+      if(pageNum > 1 && !renderedPages.has(pageNum - 1)) needLoad = true;
+      if(pageNum < pdfDoc.numPages && !renderedPages.has(pageNum + 1)) needLoad = true;
+    }
+  }
+
+  if(!needLoad) return;
+  stripLoading = true;
+  const anchorPage = visible;
+  const anchorShell = renderedPages.get(anchorPage);
+  const anchorTop = anchorShell ? anchorShell.offsetTop - viewerWrap.scrollTop : 0;
+
+  const minRendered = Math.min(...renderedPages.keys());
+  const maxRendered = Math.max(...renderedPages.keys());
+  const loadStart = Math.max(1, minRendered - 2);
+  const loadEnd = Math.min(pdfDoc.numPages, maxRendered + 2);
+
+  for(let p = loadStart; p <= loadEnd; p++){
+    await ensurePageRendered(p, myToken);
+    if(myToken !== renderToken) break;
+  }
+
+  if(myToken === renderToken && anchorShell){
+    viewerWrap.scrollTop = anchorShell.offsetTop - anchorTop;
+  }
+  stripLoading = false;
+}
+
+function onViewerScroll(){
+  if(scrollRaf) return;
+  scrollRaf = requestAnimationFrame(async () => {
+    scrollRaf = null;
+    if(!pdfDoc || !pagesStrip) return;
+
+    const visible = getVisiblePage();
+    if(visible !== currentPage){
+      currentPage = visible;
+      const ticket = ticketForPage(currentPage);
+      if(ticket) currentTicket = ticket;
+      updatePageInfo();
+    }
+    await expandStripIfNeeded();
+  });
+}
+
+async function openViewerAt(pageNum, ticketNum){
+  if(!pdfDoc) return;
+
+  resetViewerStrip();
+  const myToken = renderToken;
+
+  pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
+  currentPage = pageNum;
+  currentTicket = ticketNum ?? ticketForPage(pageNum) ?? currentTicket;
+
+  const loading = document.createElement("div");
+  loading.className = "loading";
+  loading.textContent = "Открываем страницу…";
+  viewerWrap.appendChild(loading);
+
+  pagesStrip = document.createElement("div");
+  pagesStrip.className = "pages-strip";
+  viewerWrap.innerHTML = "";
+  viewerWrap.appendChild(pagesStrip);
+
+  await loadPageWindow(pageNum, myToken);
   if(myToken !== renderToken) return;
 
   updatePageInfo();
-
-  if(ticketNum){
-    goToTicketHeading(ticketNum, textLayerDiv, shell);
-  }
+  requestAnimationFrame(() => {
+    scrollToPage(pageNum).then(() => {
+      if(ticketNum && renderToken === myToken){
+        const shell = renderedPages.get(pageNum);
+        const textLayer = shell && shell.querySelector(".textLayer");
+        if(textLayer) goToTicketHeading(ticketNum, textLayer, shell);
+      }
+    });
+  });
 }
 
 function updatePageInfo(){
@@ -426,30 +598,28 @@ function updatePageInfo(){
 }
 
 backBtn.addEventListener("click", goHome);
-
-viewerWrap.addEventListener("touchstart", (e) => {
-  swipeStartX = e.changedTouches[0].screenX;
-  swipeStartY = e.changedTouches[0].screenY;
-}, { passive: true });
-
-viewerWrap.addEventListener("touchend", (e) => {
-  if(!pdfDoc || !viewerScreen.classList.contains("active")) return;
-  const dx = e.changedTouches[0].screenX - swipeStartX;
-  const dy = e.changedTouches[0].screenY - swipeStartY;
-  if(Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy)) return;
-  if(dx < 0 && currentPage < pdfDoc.numPages) renderPage(currentPage + 1, null);
-  else if(dx > 0 && currentPage > 1) renderPage(currentPage - 1, null);
-}, { passive: true });
+viewerWrap.addEventListener("scroll", onViewerScroll, { passive: true });
 
 window.addEventListener("keydown", (e) => {
   if(!pdfDoc || !viewerScreen.classList.contains("active")) return;
-  if(e.key === "ArrowRight" && currentPage < pdfDoc.numPages) renderPage(currentPage + 1, null);
-  else if(e.key === "ArrowLeft" && currentPage > 1) renderPage(currentPage - 1, null);
+  if(e.key === "ArrowDown" || e.key === "ArrowRight" || e.key === "PageDown"){
+    if(currentPage < pdfDoc.numPages){
+      e.preventDefault();
+      scrollToPage(currentPage + 1);
+    }
+  }else if(e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "PageUp"){
+    if(currentPage > 1){
+      e.preventDefault();
+      scrollToPage(currentPage - 1);
+    }
+  }
 });
 
 window.addEventListener("resize", () => {
-  if(viewerScreen.classList.contains("active")){
-    renderPage(currentPage, currentTicket);
+  if(viewerScreen.classList.contains("active") && pdfDoc){
+    const page = currentPage;
+    const ticket = currentTicket;
+    openViewerAt(page, ticket);
   }
 });
 
