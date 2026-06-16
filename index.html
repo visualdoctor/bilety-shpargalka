@@ -238,6 +238,8 @@ let pagesStrip = null;
 let renderedPages = new Map();
 let scrollRaf = null;
 let stripLoading = false;
+let lastViewerWidth = 0;
+let resizeTimer = null;
 
 const homeScreen = document.getElementById("homeScreen");
 const viewerScreen = document.getElementById("viewerScreen");
@@ -292,7 +294,7 @@ function goToTicket(num){
   currentTicket = num;
   setActiveButton(num);
   showScreen("viewer");
-  openViewerAt(page, num);
+  openViewerAt(page, num, null, { highlight: true });
 }
 
 function goHome(){
@@ -377,15 +379,21 @@ function getContainerWidth(){
   return Math.min(viewerWrap.clientWidth - 32, 760);
 }
 
-async function renderPageShell(pageNum, myToken){
-  const page = await pdfDoc.getPage(pageNum);
-  if(myToken !== renderToken) return null;
-
+function pageViewport(page){
   const containerWidth = getContainerWidth();
   const baseViewport = page.getViewport({ scale: 1 });
-  const outputScale = window.devicePixelRatio || 1;
   const scale = containerWidth / baseViewport.width;
-  const viewport = page.getViewport({ scale });
+  return page.getViewport({ scale });
+}
+
+async function renderPageShell(pageNum, myToken, page){
+  if(!page){
+    page = await pdfDoc.getPage(pageNum);
+    if(myToken !== renderToken) return null;
+  }
+
+  const viewport = pageViewport(page);
+  const outputScale = window.devicePixelRatio || 1;
 
   const shell = document.createElement("div");
   shell.className = "page-shell";
@@ -439,11 +447,16 @@ async function ensurePageRendered(pageNum, myToken){
   pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
   if(renderedPages.has(pageNum)) return renderedPages.get(pageNum);
 
+  const page = await pdfDoc.getPage(pageNum);
+  if(myToken !== renderToken) return null;
+  const viewport = pageViewport(page);
+
   const placeholder = document.createElement("div");
   placeholder.className = "page-shell";
   placeholder.dataset.page = String(pageNum);
-  placeholder.style.width = getContainerWidth() + "px";
-  placeholder.style.minHeight = "120px";
+  placeholder.style.width = viewport.width + "px";
+  placeholder.style.height = viewport.height + "px";
+  placeholder.style.minHeight = viewport.height + "px";
   placeholder.style.display = "flex";
   placeholder.style.alignItems = "center";
   placeholder.style.justifyContent = "center";
@@ -452,7 +465,7 @@ async function ensurePageRendered(pageNum, myToken){
   placeholder.textContent = "Стр. " + pageNum + "…";
   insertPageShell(pageNum, placeholder);
 
-  const result = await renderPageShell(pageNum, myToken);
+  const result = await renderPageShell(pageNum, myToken, page);
   if(myToken !== renderToken || !result) return null;
 
   const { shell } = result;
@@ -520,7 +533,7 @@ async function expandStripIfNeeded(){
   stripLoading = true;
 
   const maxRendered = Math.max(...renderedPages.keys());
-  const loadEnd = Math.min(pdfDoc.numPages, maxRendered + 2);
+  const loadEnd = Math.min(pdfDoc.numPages, maxRendered + 4);
   for(let p = maxRendered + 1; p <= loadEnd; p++){
     await ensurePageRendered(p, myToken);
     if(myToken !== renderToken) break;
@@ -546,8 +559,9 @@ function onViewerScroll(){
   });
 }
 
-async function openViewerAt(pageNum, ticketNum, fixedStartPage){
+async function openViewerAt(pageNum, ticketNum, fixedStartPage, options){
   if(!pdfDoc) return;
+  const highlight = options && options.highlight;
 
   resetViewerStrip();
   const myToken = renderToken;
@@ -556,6 +570,7 @@ async function openViewerAt(pageNum, ticketNum, fixedStartPage){
   viewerStartPage = fixedStartPage != null ? fixedStartPage : pageNum;
   currentPage = pageNum;
   currentTicket = ticketNum ?? ticketForPage(pageNum) ?? currentTicket;
+  lastViewerWidth = viewerWrap.clientWidth;
 
   pagesStrip = document.createElement("div");
   pagesStrip.className = "pages-strip";
@@ -564,7 +579,7 @@ async function openViewerAt(pageNum, ticketNum, fixedStartPage){
 
   const throughPage = Math.min(
     pdfDoc.numPages,
-    Math.max(viewerStartPage + INITIAL_FORWARD_PAGES, pageNum)
+    Math.max(viewerStartPage + INITIAL_FORWARD_PAGES, pageNum + 2)
   );
   await loadForwardPages(throughPage, myToken);
   if(myToken !== renderToken) return;
@@ -572,7 +587,7 @@ async function openViewerAt(pageNum, ticketNum, fixedStartPage){
   updatePageInfo();
   requestAnimationFrame(() => {
     scrollToPage(pageNum).then(() => {
-      if(ticketNum && renderToken === myToken){
+      if(highlight && ticketNum && renderToken === myToken){
         const shell = renderedPages.get(pageNum);
         const textLayer = shell && shell.querySelector(".textLayer");
         if(textLayer) goToTicketHeading(ticketNum, textLayer, shell);
@@ -606,9 +621,14 @@ window.addEventListener("keydown", (e) => {
 });
 
 window.addEventListener("resize", () => {
-  if(viewerScreen.classList.contains("active") && pdfDoc){
+  if(!viewerScreen.classList.contains("active") || !pdfDoc) return;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const w = viewerWrap.clientWidth;
+    if(Math.abs(w - lastViewerWidth) < 2) return;
+    lastViewerWidth = w;
     openViewerAt(currentPage, currentTicket, viewerStartPage);
-  }
+  }, 250);
 });
 
 init();
