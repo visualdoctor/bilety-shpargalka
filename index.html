@@ -147,6 +147,7 @@
     overflow-x:hidden;
     overscroll-behavior-x:none;
     -webkit-overflow-scrolling:touch;
+    scroll-snap-type:y proximity;
     padding:6px 0 24px;
   }
   .pages-strip{
@@ -165,6 +166,9 @@
     flex-shrink:0;
     line-height:0;
     scroll-margin-top:8px;
+    scroll-snap-align:start;
+    content-visibility:auto;
+    contain-intrinsic-size:auto 900px;
   }
   .page-shell canvas{display:block;}
   .textLayer{
@@ -246,12 +250,11 @@ let pdfReady = false;
 let currentPage = 1;
 let currentTicket = null;
 let viewerStartPage = 1;
+let viewerEndPage = 1;
 let renderToken = 0;
 let pagesStrip = null;
 let renderedPages = new Map();
 let scrollRaf = null;
-let scrollIdleTimer = null;
-let stripLoading = false;
 let lastViewerWidth = 0;
 let resizeTimer = null;
 const shellMeta = new WeakMap();
@@ -313,8 +316,6 @@ function goToTicket(num){
 }
 
 function goHome(){
-  clearTimeout(scrollIdleTimer);
-  scrollIdleTimer = null;
   resetViewerStrip();
   currentTicket = null;
   setActiveButton(null);
@@ -333,8 +334,14 @@ function ticketHeadingPattern(ticketNum){
   );
 }
 
-function findHeadingItemIndices(items, ticketNum){
-  if(!items || !items.length) return null;
+function isHeadingStartText(text){
+  const t = normalizeHeadingText(text);
+  if(!t) return false;
+  return /^билет/i.test(t) || /^[№#nº°o]/i.test(t);
+}
+
+function findAllHeadingItemGroups(items, ticketNum){
+  if(!items || !items.length) return [];
   const pattern = ticketHeadingPattern(ticketNum);
   const chunks = [];
 
@@ -342,19 +349,29 @@ function findHeadingItemIndices(items, ticketNum){
     if(item && item.str) chunks.push({ idx, str: item.str });
   });
 
+  const matches = [];
   for(let i = 0; i < chunks.length; i++){
+    if(!isHeadingStartText(chunks[i].str)) continue;
+
     let combined = "";
     const group = [];
     for(let j = i; j < Math.min(i + 20, chunks.length); j++){
       combined += chunks[j].str;
       group.push(chunks[j].idx);
-      if(pattern.test(normalizeHeadingText(combined))){
-        return group;
+      const normalized = normalizeHeadingText(combined);
+      if(pattern.test(normalized) && /^билет/i.test(normalized)){
+        matches.push(group.slice());
+        break;
       }
     }
   }
+  return matches;
+}
 
-  return null;
+function findHeadingItemIndices(items, ticketNum, viewport){
+  const groups = findAllHeadingItemGroups(items, ticketNum);
+  if(!groups.length) return null;
+  return pickBestHeadingGroup(groups, items, viewport);
 }
 
 function itemBox(item, viewport){
@@ -425,29 +442,7 @@ function boxFromItems(items, indices, viewport){
   };
 }
 
-function findHeadingBoxFromSpans(textLayer, shell, ticketNum){
-  const spans = Array.from(textLayer.querySelectorAll("span"));
-  if(!spans.length) return null;
-
-  const pattern = ticketHeadingPattern(ticketNum);
-  let targetSpans = [];
-
-  for(let i = 0; i < spans.length; i++){
-    let combined = "";
-    const group = [];
-    for(let j = i; j < Math.min(i + 20, spans.length); j++){
-      combined += spans[j].textContent || "";
-      group.push(spans[j]);
-      if(pattern.test(normalizeHeadingText(combined))){
-        targetSpans = group;
-        break;
-      }
-    }
-    if(targetSpans.length) break;
-  }
-
-  if(!targetSpans.length) return null;
-
+function boxFromSpans(targetSpans, shell){
   targetSpans = filterSpansSameLine(targetSpans);
   if(!targetSpans.length) return null;
 
@@ -475,6 +470,81 @@ function findHeadingBoxFromSpans(textLayer, shell, ticketNum){
   };
 }
 
+function pickBestHeadingGroup(groups, items, viewport){
+  let bestGroup = null;
+  let bestLeft = Infinity;
+  let bestTop = Infinity;
+
+  for(const group of groups){
+    let left;
+    let top;
+    if(viewport){
+      const box = boxFromItems(items, group, viewport);
+      if(!box) continue;
+      left = box.left;
+      top = box.top;
+    }else{
+      const first = items[group[0]];
+      if(!first || !first.transform) continue;
+      left = first.transform[4];
+      top = first.transform[5];
+    }
+    if(left < bestLeft || (left === bestLeft && top < bestTop)){
+      bestLeft = left;
+      bestTop = top;
+      bestGroup = group;
+    }
+  }
+  return bestGroup;
+}
+
+function findAllHeadingSpanGroups(spans, ticketNum){
+  if(!spans.length) return [];
+  const pattern = ticketHeadingPattern(ticketNum);
+  const matches = [];
+
+  for(let i = 0; i < spans.length; i++){
+    if(!isHeadingStartText(spans[i].textContent)) continue;
+
+    let combined = "";
+    const group = [];
+    for(let j = i; j < Math.min(i + 20, spans.length); j++){
+      combined += spans[j].textContent || "";
+      group.push(spans[j]);
+      const normalized = normalizeHeadingText(combined);
+      if(pattern.test(normalized) && /^билет/i.test(normalized)){
+        matches.push(group.slice());
+        break;
+      }
+    }
+  }
+  return matches;
+}
+
+function findHeadingBoxFromSpans(textLayer, shell, ticketNum){
+  const spans = Array.from(textLayer.querySelectorAll("span"));
+  if(!spans.length) return null;
+
+  const groups = findAllHeadingSpanGroups(spans, ticketNum);
+  if(!groups.length) return null;
+
+  let bestBox = null;
+  let bestLeft = Infinity;
+  let bestTop = Infinity;
+
+  for(const group of groups){
+    const box = boxFromSpans(group, shell);
+    if(!box) continue;
+    if(box.left < bestLeft || (box.left === bestLeft && box.top < bestTop)){
+      bestLeft = box.left;
+      bestTop = box.top;
+      bestBox = box;
+    }
+  }
+
+  return bestBox;
+}
+
 function findHeadingBox(shell, ticketNum){
   const textLayer = shell.querySelector(".textLayer");
   if(textLayer){
@@ -484,7 +554,7 @@ function findHeadingBox(shell, ticketNum){
 
   const meta = shellMeta.get(shell);
   if(meta){
-    const indices = findHeadingItemIndices(meta.textContent.items, ticketNum);
+    const indices = findHeadingItemIndices(meta.textContent.items, ticketNum, meta.viewport);
     if(indices){
       const box = boxFromItems(meta.textContent.items, indices, meta.viewport);
       if(box) return box;
@@ -616,7 +686,7 @@ function insertPageShell(pageNum, shell){
 }
 
 async function ensurePageRendered(pageNum, myToken){
-  pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
+  pageNum = Math.min(Math.max(viewerStartPage, pageNum), viewerEndPage);
   if(renderedPages.has(pageNum)) return renderedPages.get(pageNum);
 
   const page = await pdfDoc.getPage(pageNum);
@@ -649,7 +719,7 @@ async function ensurePageRendered(pageNum, myToken){
 }
 
 async function loadForwardPages(throughPage, myToken){
-  const end = Math.min(pdfDoc.numPages, throughPage);
+  const end = Math.min(viewerEndPage, throughPage);
   for(let p = viewerStartPage; p <= end; p++){
     await ensurePageRendered(p, myToken);
     if(myToken !== renderToken) return;
@@ -659,7 +729,7 @@ async function loadForwardPages(throughPage, myToken){
 async function scrollToPage(pageNum){
   if(!pagesStrip || !pdfDoc) return;
   const myToken = renderToken;
-  pageNum = Math.min(Math.max(viewerStartPage, pageNum), pdfDoc.numPages);
+  pageNum = Math.min(Math.max(viewerStartPage, pageNum), viewerEndPage);
   await ensurePageRendered(pageNum, myToken);
   if(myToken !== renderToken) return;
   const shell = renderedPages.get(pageNum);
@@ -691,33 +761,6 @@ function getVisiblePage(){
   return bestPage;
 }
 
-async function expandStripIfNeeded(){
-  if(!pdfDoc || !pagesStrip || stripLoading) return;
-  const myToken = renderToken;
-  const wrapRect = viewerWrap.getBoundingClientRect();
-  let needLoad = false;
-
-  for(const shell of pagesStrip.querySelectorAll(".page-shell[data-page]")){
-    const pageNum = Number(shell.dataset.page);
-    const rect = shell.getBoundingClientRect();
-    if(rect.bottom > wrapRect.top - 400 && rect.top < wrapRect.bottom + 400){
-      if(pageNum < pdfDoc.numPages && !renderedPages.has(pageNum + 1)) needLoad = true;
-    }
-  }
-
-  if(!needLoad) return;
-  stripLoading = true;
-
-  const maxRendered = Math.max(...renderedPages.keys());
-  const loadEnd = Math.min(pdfDoc.numPages, maxRendered + 4);
-  for(let p = maxRendered + 1; p <= loadEnd; p++){
-    await ensurePageRendered(p, myToken);
-    if(myToken !== renderToken) break;
-  }
-
-  stripLoading = false;
-}
-
 function onViewerScroll(){
   if(scrollRaf) return;
   scrollRaf = requestAnimationFrame(() => {
@@ -725,18 +768,14 @@ function onViewerScroll(){
     if(!pdfDoc || !pagesStrip) return;
 
     const visible = getVisiblePage();
-    if(visible !== currentPage){
-      currentPage = visible;
+    const clamped = Math.min(Math.max(visible, viewerStartPage), viewerEndPage);
+    if(clamped !== currentPage){
+      currentPage = clamped;
       const ticket = ticketForPage(currentPage);
       if(ticket) currentTicket = ticket;
       updatePageInfo();
     }
   });
-
-  clearTimeout(scrollIdleTimer);
-  scrollIdleTimer = setTimeout(() => {
-    expandStripIfNeeded();
-  }, 220);
 }
 
 async function openViewerAt(pageNum, ticketNum, fixedStartPage, options){
@@ -748,6 +787,7 @@ async function openViewerAt(pageNum, ticketNum, fixedStartPage, options){
 
   pageNum = Math.min(Math.max(1, pageNum), pdfDoc.numPages);
   viewerStartPage = fixedStartPage != null ? fixedStartPage : pageNum;
+  viewerEndPage = Math.min(pdfDoc.numPages, viewerStartPage + INITIAL_FORWARD_PAGES);
   currentPage = pageNum;
   currentTicket = ticketNum ?? ticketForPage(pageNum) ?? currentTicket;
   lastViewerWidth = viewerWrap.clientWidth;
@@ -757,10 +797,7 @@ async function openViewerAt(pageNum, ticketNum, fixedStartPage, options){
   viewerWrap.innerHTML = "";
   viewerWrap.appendChild(pagesStrip);
 
-  const throughPage = Math.min(
-    pdfDoc.numPages,
-    Math.max(viewerStartPage + INITIAL_FORWARD_PAGES, pageNum + 2)
-  );
+  const throughPage = viewerEndPage;
   await loadForwardPages(throughPage, myToken);
   if(myToken !== renderToken) return;
 
@@ -778,6 +815,9 @@ async function openViewerAt(pageNum, ticketNum, fixedStartPage, options){
 
 function updatePageInfo(){
   let label = "Стр. " + currentPage + " из " + pdfDoc.numPages;
+  if(viewerEndPage < pdfDoc.numPages){
+    label += " (до " + viewerEndPage + ")";
+  }
   if(currentTicket) label = "Билет " + currentTicket + " · " + label;
   pageInfo.textContent = label;
 }
@@ -788,7 +828,7 @@ viewerWrap.addEventListener("scroll", onViewerScroll, { passive: true });
 window.addEventListener("keydown", (e) => {
   if(!pdfDoc || !viewerScreen.classList.contains("active")) return;
   if(e.key === "ArrowDown" || e.key === "ArrowRight" || e.key === "PageDown"){
-    if(currentPage < pdfDoc.numPages){
+    if(currentPage < viewerEndPage){
       e.preventDefault();
       scrollToPage(currentPage + 1);
     }
